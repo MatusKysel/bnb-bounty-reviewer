@@ -1,0 +1,7 @@
+{
+  "name": "bnb-bounty-reviewer",
+  "description": "Evaluates BNB Chain bug bounty reports for validity and assigns a priority (P) rating",
+  "author": {
+    "name": "MatusKysel"
+  }
+}
