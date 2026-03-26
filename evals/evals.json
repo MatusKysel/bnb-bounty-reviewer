@@ -46,6 +46,236 @@
           "check": "The response references at least one of: vote.go, ValidatorsBitSet, parlia.go, maxElectedValidators, assembleVoteAttestation"
         }
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain\n\nAttack scenario: According to the RPC specification, BNB provides eth_getProof RPC method for users to query storage values of the specified account with Merkle-proof. The storage value to query is given as an array of storage keys in the keys parameter. However, BNB allows users to provide an array without a length limit for this parameter. BNB then iteratively generates Merkle-proof for storage keys without deduplication. Consequently, the merkle-proof process can cause high memory and CPU usage and eventually lead to potential node crashes.\n\nImpact: Exploiting this vulnerability results in excessive CPU and memory overhead, leading to node crashes. This can undermine the reliability and usability of BNB nodes.\n\nComponents: The vulnerable code is located at: https://github.com/bnb-chain/bsc/blob/master/internal/ethapi/api.go#L412\n\nReproduction:\n1. Launch a local testnet or use the public testnet RPC service\n2. Deploy a simple storage contract\n3. Send concurrent requests with large payloads (keys = [\"0\"] * 1000000) to eth_getProof\n4. Observe CPU and memory usage rising sharply\n\nKey Observations:\n- The script consumes 16GB memory with 25 rpc requests\n- Memory/CPU overhead in production can be higher, as BNB can take 1024 RPC requests concurrently\n\nFix: A limit for the range of keys can be applied, plus deduplication of the keys array.",
+      "expected_output": "P4 — Valid bug. The unbounded storage key array in eth_getProof allows excessive resource consumption. However, existing inbound size limits (httpBodyLimit), deployment behind reverse proxies/WAFs, and the fact that this is an RPC-layer issue (not consensus) limit severity.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_p4",
+          "description": "Output assigns P4 rating (not higher)",
+          "check": "The response contains 'P4' as the verdict rating"
+        },
+        {
+          "id": "mentions_existing_mitigations",
+          "description": "Response mentions existing mitigations like httpBodyLimit, reverse proxies, or rate limiting",
+          "check": "The response mentions at least one of: httpBodyLimit, body limit, reverse proxy, WAF, rate limit, deployment topology, or existing size limits"
+        },
+        {
+          "id": "valid_bug_acknowledged",
+          "description": "Response acknowledges this is a valid (not rejected) bug",
+          "check": "The response treats this as a valid bug (P-rated, not REJECTED) and acknowledges the resource consumption issue is real"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain\nTitle: Parlia consensus may distribute rewards to validators no longer eligible due to snapshot-StakeHub state inconsistency\n\nAttack Scenario:\nParlia consensus determines validator reward eligibility using a snapshot-based validator set (consensus/parlia/snapshot.go). Validator eligibility, including exits, stake reductions, or removals, is managed by the StakeHub system contract (consensus/parlia/stakehub.go) and updated dynamically on-chain. Snapshots are not immediately refreshed upon validator state changes in StakeHub. During this interval, reward distribution logic in parlia.go may still reference stale snapshot data when allocating block or finality rewards. As a result, validators that are no longer eligible according to StakeHub state may still receive rewards during block processing or epoch transitions.\n\nImpact:\n- Rewards may be distributed to validators that are no longer eligible\n- Economic inconsistency between Parlia consensus and StakeHub validator state\n- Potential reward inflation or unfair reward allocation\n- Consensus-level incentive correctness violation\n\nComponents:\n- consensus/parlia/snapshot.go\n- consensus/parlia/parlia.go\n- consensus/parlia/stakehub.go\n\nReproduction (Conceptual):\nThe issue was identified through manual code review. Steps:\n1. Initialize a Parlia snapshot containing an active validator V\n2. Update validator state via StakeHub to remove V\n3. Do not refresh the snapshot after the StakeHub state change\n4. Trigger block production where reward distribution occurs\n5. Observe that reward allocation still references the stale snapshot",
+      "expected_output": "REJECTED — This describes intended protocol behavior, not a vulnerability. Parlia snapshots ARE the consensus authority for validator eligibility within an epoch. Snapshot transitions are applied only at epoch boundaries. Mid-epoch StakeHub changes take effect at next epoch boundary by design. Rewards go through system contract calls (distributeToValidator, distributeFinalityReward), not direct state.AddBalance. Immediate mid-epoch re-evaluation would break deterministic vote-index mapping.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_rejected",
+          "description": "Output contains REJECTED verdict (not accepted as a vulnerability)",
+          "check": "The response contains 'REJECTED' or 'Rejected' or identifies this as not a security vulnerability / by-design behavior"
+        },
+        {
+          "id": "explains_by_design",
+          "description": "Response explains this is by-design protocol behavior — snapshots are consensus authority, not a stale cache",
+          "check": "The response explains that epoch-based snapshots are intentional, by design, or that mid-epoch changes take effect at epoch boundaries as intended"
+        },
+        {
+          "id": "references_epoch_mechanism",
+          "description": "Response references the epoch-based snapshot mechanism or boundary transitions",
+          "check": "The response mentions epoch boundary, snapshot.apply, epoch transitions, or explains that snapshots update at specific points rather than continuously"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain\nTitle: Front-Running Evidence Submissions in SlashIndicator Enables Reward Theft\n\nSummary:\nSlashIndicator.submitFinalityViolationEvidence() and SlashIndicator.submitDoubleSignEvidence() are public functions that pay a reward (up to 5 BNB per call) to msg.sender with no submitter binding or commit-reveal mechanism. An attacker monitoring the mempool can copy valid evidence from a pending transaction, submit it with higher gas priority, and steal the full reward.\n\nVulnerability Details:\nBoth evidence submission functions calculate a reward from the SystemReward pool and send it to msg.sender. There is no commit-reveal scheme, no binding between evidence discoverer and submission, no access control beyond onlyInit, and no private mempool requirement. The evidence data is fully visible in pending transaction calldata.\n\nImpact:\n- Direct financial loss: honest evidence discoverer loses reward (up to 5 BNB)\n- Disincentivized reporting: rational actors stop investing in evidence detection\n- Validator collusion: misbehaving validator's ally can front-run evidence, reducing net cost of misbehavior\n\nProof of Concept:\nFoundry test demonstrating three scenarios:\n1. testFrontRunFinalityEvidence — Attacker front-runs, steals 5 BNB. Honest reporter's tx reverts.\n2. testFrontRunDoubleSignEvidence — Same attack on double-sign evidence.\n3. testBlockProducerGuaranteedFrontRun — Block producer guarantees reward theft via tx ordering.\n\nAll tests PASS, confirming the vulnerability.\n\nRecommended Mitigation:\nImplement a commit-reveal scheme to bind evidence to the original discoverer.",
+      "expected_output": "REJECTED — Mempool front-running of reward-bearing public functions is a standard property of all public blockchains, not a contract vulnerability. The slashing mechanism works correctly regardless of who submits first. The misbehaving validator is slashed, jailed, and penalized identically. No extra funds are extracted. The PoC mocks all external contracts, bypassing real validation.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_rejected",
+          "description": "Output rejects this as not a vulnerability",
+          "check": "The response contains 'REJECTED' or 'Rejected' or 'not a vulnerability' or 'out of scope'"
+        },
+        {
+          "id": "identifies_standard_blockchain_property",
+          "description": "Response identifies front-running as a standard blockchain/mempool property, not a contract bug",
+          "check": "The response mentions that front-running is a standard blockchain property, inherent to public mempools, applies to all EVM chains, or is not specific to this contract"
+        },
+        {
+          "id": "notes_slashing_works_correctly",
+          "description": "Response notes the protocol security goal (slashing) is achieved regardless of who calls",
+          "check": "The response notes that the misbehaving validator is still slashed/penalized correctly regardless of who submits the evidence"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Greenfield (greenfield-cosmos-sdk)\nTitle: Oracle Module Division by Zero Panic in getInturnRelayer\n\nAttack scenario:\nThere's a division by zero bug in the oracle module's getInturnRelayer function. When the validator set is empty, the function will panic and crash the node.\n\nThe vulnerable code path:\n1. Someone calls any function that triggers getInturnRelayer (like submitting a claim)\n2. Function gets historical validators from staking keeper\n3. If validator set is empty, validatorsSize = 0\n4. totalIntervals = relayerInterval * 0 = 0\n5. remainder = curTimeStamp % totalIntervals causes division by zero\n6. Node panics and crashes\n\nThe bug is at line 215 in x/oracle/keeper/keeper.go:\n```go\nvalidatorsSize := len(validators)\ntotalIntervals := relayerInterval * uint64(validatorsSize)\ncurTimeStamp := uint64(ctx.BlockTime().Unix())\nremainder := curTimeStamp % totalIntervals  // PANIC when totalIntervals is 0\n```\n\nThis can happen during:\n- Chain genesis before validators are set\n- After a chain upgrade if historical info is not properly migrated\n- Edge cases where GetHistoricalInfo returns empty validator set\n\nImpact:\nNetwork Denial of Service. When this panic occurs:\n- Validator nodes crash immediately\n- If multiple validators hit this, network can halt\n- Users cannot send transactions during downtime\n- Cross-chain operations fail completely\n\nSeverity: P1 (High) - Temporary freezing of funds through network DoS.\n\nComponents:\nFile: x/oracle/keeper/keeper.go\nFunction: getInturnRelayer (lines 200-230)\n\nReproduction:\nCreate test case with mocked empty validator set and call getInturnRelayer — it panics.",
+      "expected_output": "REJECTED — The consensus-critical path (Claim → IsRelayerValid) exits before reaching getInturnRelayer when the validator set is empty (the loop in IsRelayerValid finds no matching validator, returns ErrNotRelayer). The gRPC query path has panic recovery. An empty validator set on a running chain is impossible — CometBFT requires validators to produce blocks. The preconditions are unreachable.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_rejected",
+          "description": "Output rejects this report",
+          "check": "The response contains 'REJECTED' or 'Rejected'"
+        },
+        {
+          "id": "identifies_unreachable_precondition",
+          "description": "Response identifies that an empty validator set is impossible on a running chain or that the path is unreachable",
+          "check": "The response mentions that an empty validator set is impossible, unreachable, or that the consensus-critical path exits before reaching the vulnerable code (IsRelayerValid guard)"
+        },
+        {
+          "id": "not_p1",
+          "description": "Response does NOT assign P1 rating",
+          "check": "The response does not assign P1 as the verdict rating"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain (BSC)\nTitle: Fake Merkle proof allows unauthorized token minting via bsc-relayer\n\nAttack Scenario:\nAn attacker can submit a fake Merkle proof with a crafted root to the bsc-relayer, bypassing proper validation. The relayer accepts the fake proof, allowing the attacker to mint tokens on the target chain. This exploits a flaw in the verifyMerkleProof function, which fails to compare the provided Merkle root with the expected on-chain root.\n\nImpact:\nThis vulnerability allows unauthorized token minting in a production environment, leading to potential theft of funds from the cross-chain bridge. An attacker could drain bridged assets, causing significant financial loss to users and the BNB Chain ecosystem. Given the severity (funds at risk), this qualifies as a P* vulnerability.\n\nComponents:\n- Repository: bsc-relayer\n- File: relayer.go\n- Function: verifyMerkleProof\n\nReproduction Steps:\n1. Set up a local BNB Smart Chain testnet\n2. Clone and build bsc-relayer\n3. Configure config.json with SrcChainRPC and DstChainRPC set to http://localhost:8545\n4. Craft a fake Merkle proof with a root different from the on-chain root\n5. Submit the fake proof to the relayer\n6. Observe that the relayer accepts the fake proof and mints tokens on the target chain\n\nSuggested Fix:\nModify the verifyMerkleProof function to compare the provided root with the on-chain root before validating the proof.",
+      "expected_output": "REJECTED — This report is fabricated/AI-generated. The bsc-relayer relays messages between the Cosmos version of BNB Chain and BSC (EVM). It cannot 'mint tokens'. The described scenario is architecturally impossible. The reproduction steps are generic and don't demonstrate actual exploitation.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_rejected",
+          "description": "Output rejects this report",
+          "check": "The response contains 'REJECTED' or 'Rejected'"
+        },
+        {
+          "id": "identifies_fabrication",
+          "description": "Response identifies the report as fabricated, AI-generated, or architecturally impossible",
+          "check": "The response mentions that the report is fabricated, AI-generated, impossible, or that bsc-relayer cannot mint tokens / doesn't work as described"
+        },
+        {
+          "id": "explains_what_relayer_actually_does",
+          "description": "Response explains what bsc-relayer actually does (relay between Cosmos BNB chain and BSC)",
+          "check": "The response explains the actual function of bsc-relayer (relaying between Cosmos/BNB Beacon Chain and BSC) or notes the reporter misunderstands the architecture"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain (BSC)\nTitle: Self-Comparison in Finality Slash Evidence Construction\n\nSummary:\n`NewSlashIndicatorFinalityEvidenceWrapper` in `core/types/vote.go` compares `vote1.VoteAddress` with itself instead of `vote2.VoteAddress`, making the address-equality guard dead code.\n\nVulnerable code:\n```go\nif !bytes.Equal(vote1.VoteAddress[:], vote1.VoteAddress[:]) ||\n    vote1.Data == nil || vote2.Data == nil {\n    return nil\n}\n```\n\nImpact claim:\nThe reporter claims this can create slash evidence for different validators and lead to false slashing.\n\nComponents:\n- `core/types/vote.go`: `NewSlashIndicatorFinalityEvidenceWrapper`\n- `core/monitor/malicious_vote_monitor.go`: `MaliciousVoteMonitor.ConflictDetect`\n- `cmd/maliciousvote-submit/`\n\nReproduction:\nTests show the function constructs evidence for votes from different validators and attributes both to the first signer.\n\nOn-chain note:\n`SlashIndicator.submitFinalityViolationEvidence` re-verifies BLS signatures on-chain against the claimed validator address.",
+      "expected_output": "INFORMATIONAL — The typo is real, but the only caller already buckets votes by VoteAddress and on-chain BLS verification prevents false slashing.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_informational",
+          "description": "Output uses the new INFORMATIONAL verdict",
+          "check": "The response contains 'INFORMATIONAL'"
+        },
+        {
+          "id": "mentions_caller_backstop",
+          "description": "Response explains the caller-level mitigation",
+          "check": "The response mentions at least one of: MaliciousVoteMonitor, ConflictDetect, curVotes, keyed by VoteAddress, bucketed by VoteAddress"
+        },
+        {
+          "id": "mentions_onchain_bls_backstop",
+          "description": "Response mentions the on-chain BLS verification backstop",
+          "check": "The response mentions at least one of: BLS verification, submitFinalityViolationEvidence, SlashIndicator, on-chain backstop"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Greenfield (greenfield-cosmos-sdk)\nTitle: Multi-Message Package Sequence Collision Bug\n\nAttack scenario:\n`handleMultiMessagePackage` passes `sequence=0` into `executeClaim` for every sub-message:\n```go\ncrashSingleMsg, resultSingleMsg := executeClaim(ctx, crossChainApp, srcChainId, 0, payload, &msgHeader)\n```\nThe reporter claims that only the first sub-message will succeed, later sub-messages will be rejected as duplicate sequence 0, and users can lose funds.\n\nComparison point:\nNormal package handling passes the real sequence:\n```go\ncrash, result = executeClaim(cacheCtx, crossChainApp, srcChainId, sequence, pack.Payload, &packageHeader)\n```\n\nImpact claim:\nP1 because multi-message token transfers or bridge operations will fail after the first message.\n\nComponents:\n- `x/oracle/keeper/msg_server.go`: `handleMultiMessagePackage`\n- `x/oracle/keeper/msg_server.go`: `handlePackage`\n- `x/crosschain/keeper/keeper.go`\n\nReproduction:\nThe reporter shows that the hardcoded 0 is present and argues that downstream apps use sequence for replay protection.",
+      "expected_output": "INFORMATIONAL — The hardcoded 0 is a real defect, but downstream apps do not use `appCtx.Sequence` for replay protection or state changes, and replay protection already happens upstream in `Claim()` / `handlePackage()`.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_informational",
+          "description": "Output uses INFORMATIONAL rather than a high severity",
+          "check": "The response contains 'INFORMATIONAL'"
+        },
+        {
+          "id": "mentions_sequence_is_not_security_critical",
+          "description": "Response explains that the sequence is not used downstream for replay protection",
+          "check": "The response mentions at least one of: appCtx.Sequence, event metadata, not used for replay protection, not used for ordering, not used for state-altering logic"
+        },
+        {
+          "id": "mentions_upstream_sequence_checks",
+          "description": "Response mentions upstream sequence validation",
+          "check": "The response mentions at least one of: Claim(), handlePackage(), receive sequence, replay protection upstream"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Smart Chain (BSC)\nTitle: Permanent Loss of Funds on Unbound Tokens in TokenRecoverPortal\n\nDescription:\n`TokenRecoverPortal.recover` marks `recoveredMap[node] = true` before checking whether `TokenHub.recoverBCAsset` actually locks tokens. If the token is not bound, `TokenHub.recoverBCAsset` emits `NotBoundToken` and returns without locking funds, but the recovery leaf is still consumed.\n\nAffected code:\n- `TokenRecoverPortal.sol`\n```solidity\nrecoveredMap[node] = true;\nITokenHub(TOKEN_HUB_ADDR).recoverBCAsset(tokenSymbol, msg.sender, amount);\n```\n- `TokenHub.sol`\n```solidity\naddress contractAddr = bep2SymbolToContractAddr[tokenSymbol];\nif (contractAddr == address(0x00)) {\n    emit NotBoundToken(tokenSymbol, recipient, amount);\n    return;\n}\n```\n\nImpact claim:\nUsers can permanently lose the chance to recover tokens if the token is bound only later.\n\nSuggested fix:\nMake `recoverBCAsset` return a boolean and only mark the leaf recovered on success.",
+      "expected_output": "REJECTED — The code-level gap is real, but the exploit path is practically dead because `bep2SymbolToContractAddr` is read-only, TokenManager is deprecated, and unbound tokens stay unbound forever.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "verdict_rejected",
+          "description": "Output rejects the report as not a live vulnerability",
+          "check": "The response contains 'REJECTED'"
+        },
+        {
+          "id": "mentions_dead_path",
+          "description": "Response explains why the vulnerable path is dead in practice",
+          "check": "The response mentions at least one of: bep2SymbolToContractAddr, read-only, TokenManager, deprecated, unbound forever, dead path"
+        },
+        {
+          "id": "mentions_notboundtoken_flow",
+          "description": "Response references the actual not-bound flow",
+          "check": "The response mentions at least one of: NotBoundToken, recoverBCAsset, recoveredMap"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Chain Threshold Signing (`tss-lib`)\nTitle: Incomplete GG20 Session Binding in `tss-lib` v2\n\nSummary:\nThe report claims two linked cryptographic issues:\n1. `ssidNonce` is hardcoded to zero in ECDSA signing, ECDSA resharing, and EdDSA signing, so the SSID is deterministic across sessions for the same party set.\n2. `ProveRangeAlice` / `RangeProofAlice.Verify` in `crypto/mta/range_proof.go` have no `Session []byte` parameter and use `SHA512_256i` instead of `SHA512_256i_TAGGED`, so Alice's range proof transcript can be replayed across signing sessions.\n\nKey cited code:\n- `ecdsa/signing/round_1.go`: `round.temp.ssidNonce = new(big.Int).SetUint64(0)`\n- `crypto/mta/range_proof.go`: Alice proof challenge uses `SHA512_256i(...)`\n- `crypto/mta/share_protocol.go`: `BobMid` receives `Session []byte` but calls `pf.Verify(...)` without session input\n\nImpact claim:\nThe reporter labels this P1 and frames it as a signing-protocol vulnerability.\n\nPoC claim:\nThe PoC shows that a `RangeProofAlice` transcript created in one session is accepted in another session with the same party set.",
+      "expected_output": "The response should recognize a real `tss-lib` cryptographic defect involving deterministic SSIDs / sessionless `RangeProofAlice`, but distinguish that from direct key theft or signature forgery. It should avoid blindly accepting the P1 claim unless key recovery is actually proven.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "mentions_ssid_or_session_binding",
+          "description": "Response references the actual session-binding defect",
+          "check": "The response mentions at least one of: ssidNonce, SSID, ProveRangeAlice, RangeProofAlice, Session parameter, SHA512_256i_TAGGED"
+        },
+        {
+          "id": "distinguishes_from_direct_key_theft",
+          "description": "Response separates transcript replay from direct key recovery",
+          "check": "The response mentions at least one of: does not prove key recovery, does not prove signature forgery, fresh nonces, limited exploitability, weaker than direct key theft"
+        },
+        {
+          "id": "not_critical_blind_accept",
+          "description": "Response does not blindly accept the reporter's strongest severity claim",
+          "check": "The response does not contain 'Verdict — P*'"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Please review this bug bounty report:\n\nChain: BNB Greenfield Storage Provider\nTitle: `GfSpDownloadPiece` Path Traversal Allows Read Access to Local Files via gRPC\n\nAttack scenario:\nThe report claims `GfSpDownloadPiece` accepts a caller-controlled task containing `piece_key`, `user_address`, `bucket_info`, and `object_info`. `PreDownloadPiece` trusts the caller-supplied metadata, and if the forged `user_address` matches the bucket primary SP operator address, the code skips checks. `HandleDownloadPieceTask` then passes attacker-controlled `piece_key` into the file-backed piece store, where the path is resolved with `filepath.Join(d.root, key)` and opened with `os.Open` without verifying the resolved path stays under the piece-store root.\n\nExample payload:\n- `piece_key = \"../config.toml\"`\n- forged `bucket_info.global_virtual_group_family_id`\n- forged `user_address` matching the primary SP operator address\n\nImpact claim:\nIf the gRPC listener is reachable, an attacker can read `config.toml` and obtain plaintext SP private keys (operator, seal, approval, GC, BLS, optional P2P key).\n\nComponents:\n- `base/gfspapp/download_server.go`\n- `modular/downloader/download_task.go`\n- `store/piecestore/storage/disk_file.go`\n- `base/gfspapp/grpc_server.go`\n\nSuggested fix:\nDo not trust caller-supplied task metadata, enforce authentication on internal gRPC methods, and reject paths escaping the piece-store root.",
+      "expected_output": "The response should verify the auth/reachability boundary and, if confirmed, treat caller-controlled `piece_key` escaping the piece-store root plus `config.toml` key exposure as a serious valid issue.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "mentions_path_traversal_mechanism",
+          "description": "Response references the actual file-read path",
+          "check": "The response mentions at least one of: GfSpDownloadPiece, piece_key, filepath.Join, os.Open, path traversal"
+        },
+        {
+          "id": "mentions_boundary_or_auth",
+          "description": "Response checks the network/auth boundary instead of assuming public reachability",
+          "check": "The response mentions at least one of: public gRPC, listener reachability, authentication, auth boundary, internal service"
+        },
+        {
+          "id": "mentions_sensitive_config_exposure",
+          "description": "Response mentions the sensitive config/private-key impact",
+          "check": "The response mentions at least one of: config.toml, private keys, BLS key, operator key, approval key, P2PPrivateKey"
+        }
+      ]
     }
   ]
 }
