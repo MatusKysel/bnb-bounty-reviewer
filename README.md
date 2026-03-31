@@ -38,10 +38,10 @@ Codex should install the nested skill into:
 
 ### Claude
 
-Ask Claude:
+Just Execute this:
 
 ```text
-Install or clone https://github.com/MatusKysel/bnb-bounty-reviewer into my Claude skills directory so I can use bnb-bounty-reviewer.
+claude plugin marketplace add MatusKysel/bnb-bounty-reviewer
 ```
 
 Claude should place the repository at:
